@@ -70,6 +70,7 @@
         <span class="pill">DEF <b id="uiDEF">0</b></span>
         <span class="pill">CREAT <b id="uiCR">0</b></span>
         <span class="pill">Puntos <b id="uiScore">0</b></span>
+        <span class="pill">Llaves <b id="uiKeys">0</b>/3</span>
       </div>
       <div class="right">
         <span class="pill">Mover: <b>WASD/Flechas</b></span>
@@ -154,16 +155,14 @@
   let lastDir = [1,0];
   let encounterCooldown = 0.0;
 
-  // Murciélagos
-  const BAT_COUNT = 10;
-  const BATS = [];
-
   // ---------- Estado ----------
   const state = {
     player:{x:3, y:3, hp:100, maxhp:100, baseDEF:0, baseCR:0, level:1, xp:0, score:0,
-            equipped:'cloth', inventory:['cloth']},
+            equipped:'cloth', inventory:['cloth'], keys:0, hasSword:false},
     enemy:{x:26, y:13, hp:100, maxhp:100, alive:true},
     friend:{x:6, y:6},
+    bossDefeated:false,
+    gameWon:false,
     muted:false
   };
 
@@ -173,9 +172,11 @@
     if (saved.player) Object.assign(state.player, saved.player);
     if (saved.enemy) Object.assign(state.enemy, saved.enemy);
     if (typeof saved.muted==='boolean') state.muted=saved.muted;
+    if (typeof saved.bossDefeated==='boolean') state.bossDefeated=saved.bossDefeated;
+    if (typeof saved.gameWon==='boolean') state.gameWon=saved.gameWon;
   }catch(e){}
   function persist(){
-    localStorage.setItem('rpg_edu_lab', JSON.stringify({player:state.player, enemy:state.enemy, muted:state.muted}));
+    localStorage.setItem('rpg_edu_lab', JSON.stringify({player:state.player, enemy:state.enemy, muted:state.muted, bossDefeated:state.bossDefeated, gameWon:state.gameWon}));
   }
 
   // ---------- Canvas con doble buffer ----------
@@ -229,6 +230,8 @@
     // Ahuyenta enemigo actual si existe
     if (state.enemy.alive){ state.enemy.alive=false; info('¡Resplandor! El enemigo huye. Encuentros bloqueados por 3 s.'); }
     encounterCooldown = Math.max(encounterCooldown, REPEL_DURATION);
+    // espanta murciélagos
+    BATS.length = 0; batRespawn = 5;
     try { beep(1400,.08); setTimeout(()=>beep(900,.08), 50); } catch(_){}
     updateFlashBtn();
   }
@@ -290,9 +293,35 @@
   state.friend.x = 6.5; state.friend.y = 6.5;
   state.enemy.x = COLS-3.5; state.enemy.y = ROWS-3.5;
 
+  // Puerta y llaves
+  const door = {x:COLS-2.5, y:ROWS-2.5};
+  MAP[Math.floor(door.y)][Math.floor(door.x)] = '.';
+  const KEYS=[];
+  function randomFloor(){
+    let x,y; let ok=false;
+    while(!ok){
+      x=irnd(1,COLS-2); y=irnd(1,ROWS-2);
+      if (!isWall(x,y) && (Math.floor(door.x)!==x || Math.floor(door.y)!==y)) ok=true;
+    }
+    return {x:x+0.5,y:y+0.5};
+  }
+  for(let i=0;i<3;i++){ const p=randomFloor(); KEYS.push({x:p.x,y:p.y,found:false}); }
+
+  function checkKeyPickup(){
+    for(const k of KEYS){
+      if(!k.found && dist(state.player.x,state.player.y,k.x,k.y)<0.6){
+        k.found=true;
+        state.player.keys++;
+        info(`Llave encontrada (${state.player.keys}/3)`);
+        syncUI(); persist();
+      }
+    }
+  }
+
   // ---------- Murciélagos ----------
   const BAT_COUNT = 10;
   const BATS = [];
+  let batRespawn = 0;
   function spawnBat(){
     // Encuentra un piso aleatorio
     let bx=2.5, by=2.5;
@@ -313,6 +342,10 @@
   for (let i=0;i<BAT_COUNT;i++) BATS.push(spawnBat());
 
   function stepBats(dt){
+    if (BATS.length===0){
+      if (batRespawn>0){ batRespawn=Math.max(0, batRespawn-dt); if (batRespawn===0){ for(let i=0;i<BAT_COUNT;i++) BATS.push(spawnBat()); } }
+      return;
+    }
     for (const b of BATS){
       b.wing += dt*18;
       // Movimiento con leve zigzag
@@ -348,6 +381,21 @@
     g.restore();
   }
 
+  function drawKeys(g){
+    for(const k of KEYS){
+      if(k.found) continue;
+      const [px,py]=toXY(k.x-0.5,k.y-0.5);
+      g.fillStyle='#ffd24d';
+      g.beginPath(); g.moveTo(px+16,py+8); g.lineTo(px+22,py+16); g.lineTo(px+16,py+24); g.lineTo(px+10,py+16); g.closePath(); g.fill();
+    }
+  }
+
+  function drawDoor(g){
+    const [px,py]=toXY(door.x-0.5,door.y-0.5);
+    g.fillStyle = state.bossDefeated ? '#6be36b' : '#d4a243';
+    g.fillRect(px,py,TILE,TILE);
+  }
+
   // ---------- Movimiento (delta-time) + encuentros ----------
   function stepPlayer(dt){
     const p=state.player;
@@ -374,6 +422,7 @@
         tryEncounter();
       }
     }
+    checkKeyPickup();
   }
 
   function tryEncounter(){
@@ -422,9 +471,19 @@
   // ---------- NPCs ----------
   function interact(){
     const p=state.player, e=state.enemy, f=state.friend;
-    if (dist(p.x,p.y,f.x,f.y) < 1.6){ startQuiz('mentor'); return; }
+    if (dist(p.x,p.y,f.x,f.y) < 1.6){
+      if (!p.hasSword){ p.hasSword=true; p.baseDEF+=2; info('Tu amigo te entregó una espada (+2 DEF).'); syncUI(); persist(); }
+      else startQuiz('mentor');
+      return;
+    }
+    if (dist(p.x,p.y,door.x,door.y) < 1.6){
+      if (p.keys < 3){ info(`La puerta está cerrada. Llaves ${p.keys}/3.`); return; }
+      if (!state.bossDefeated){ startQuiz('boss'); return; }
+      if (!state.gameWon){ state.gameWon=true; info('🎉 ¡Felicidades! Has ganado el juego!'); persist(); }
+      return;
+    }
     if (e.alive && dist(p.x,p.y,e.x,e.y) < 1.6){ startQuiz('enemy'); return; }
-    info('Acércate al Amigo (azul) o al Enemigo (rojo) para interactuar.');
+    info('Acércate al Amigo, la Puerta o un Enemigo para interactuar.');
   }
 
   // ---------- Inventario / equipo ----------
@@ -559,13 +618,13 @@
 
   function quizOpen(){ return olQuiz.style.display==='flex'; }
   function startQuiz(kind){
-    const rounds = QUIZ_ROUNDS;
+    const rounds = kind==='boss'?5:QUIZ_ROUNDS;
     const sel = pick(QUESTIONS, rounds);
     quiz = { kind, idx:0, pHP:100, eHP:100, qs:sel, lock:false };
     qRes.textContent=''; qNext.style.display='none';
     olQuiz.style.display='flex';
     renderQuestion();
-    info(kind==='mentor' ? 'Desafío amistoso del Mentor (más XP).' : '¡Encuentro! Combate de conocimiento.');
+    info(kind==='mentor' ? 'Desafío amistoso del Mentor (más XP).' : (kind==='boss' ? '¡Enfrentas al jefe final!' : '¡Encuentro! Combate de conocimiento.'));
   }
   function renderQuestion(){
     const cur = quiz.qs[quiz.idx];
@@ -609,9 +668,14 @@
     qNext.style.display='inline-block'; qNext.textContent='Cerrar';
     qNext.onclick = ()=>{ olQuiz.style.display='none'; quiz=null; syncUI(); };
     if (victory){
-      qRes.innerHTML='🏆 ¡Victoria! Recibes <b>botín</b> y curas 20 HP.';
-      heal(20); rewardItem();
-      state.enemy.alive=true; state.enemy.hp=state.enemy.maxhp;
+      if (quiz.kind==='boss'){
+        qRes.innerHTML='🏆 ¡Derrotaste al jefe final!';
+        state.bossDefeated=true;
+      } else {
+        qRes.innerHTML='🏆 ¡Victoria! Recibes <b>botín</b> y curas 20 HP.';
+        heal(20); rewardItem();
+        state.enemy.alive=true; state.enemy.hp=state.enemy.maxhp;
+      }
     } else {
       qRes.textContent='😵 Derrota. Recuperas fuerzas con el tiempo.';
       state.player.hp = Math.max(20, state.player.hp-10);
@@ -654,6 +718,7 @@
   const uiDEF=document.getElementById('uiDEF');
   const uiCR=document.getElementById('uiCR');
   const uiScore=document.getElementById('uiScore');
+  const uiKeys=document.getElementById('uiKeys');
   function syncUI(){
     uiLevel.textContent = state.player.level;
     uiXP.textContent = state.player.xp;
@@ -662,6 +727,7 @@
     uiDEF.textContent = statDEF();
     uiCR.textContent = statCR();
     uiScore.textContent = state.player.score;
+    uiKeys.textContent = state.player.keys;
   }
   updateMuteBtn(); updateFlashBtn(); syncUI();
 
@@ -767,6 +833,8 @@
 
     // Render en buffer para evitar parpadeo
     drawMap(bx);
+    drawKeys(bx);
+    drawDoor(bx);
     for (const b of BATS) drawBat(bx, b);
     drawFriend(bx);
     drawEnemy(bx, dt);
