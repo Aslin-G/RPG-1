@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Riesgo Psicosocial – App ML (La Guajira)</title>
+
+<!-- Librerías de navegador (CDN) -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<style>
+  :root{ --bg:#0f172a; --card:#111827; --muted:#94a3b8; --txt:#e5e7eb; --accent:#22d3ee; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444;}
+  *{box-sizing:border-box}
+  body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; background:linear-gradient(120deg,#0b1227,#0c1433);}
+  header{padding:24px; color:var(--txt); text-align:center; border-bottom:1px solid #1f2937}
+  header h1{margin:0 0 8px; font-weight:700; letter-spacing:.3px}
+  header p{margin:0; color:var(--muted)}
+  main{max-width:1200px; margin:24px auto; padding:0 16px 48px}
+  .grid{display:grid; gap:16px}
+  @media(min-width:960px){ .grid{grid-template-columns:1.1fr 1.2fr}}
+  .card{background:rgba(17,24,39,.85); border:1px solid #1f2937; border-radius:16px; padding:18px; color:var(--txt); box-shadow:0 10px 40px rgba(0,0,0,.25)}
+  .card h2{margin:4px 0 14px; font-size:18px}
+  .row{display:flex; gap:12px; flex-wrap:wrap; align-items:center}
+  label{color:var(--muted); font-size:14px}
+  input[type="file"]{color:var(--txt)}
+  input[type="text"], select{background:#0b1223; border:1px solid #1f2937; color:var(--txt); padding:8px 10px; border-radius:10px}
+  button{background:linear-gradient(135deg,#06b6d4,#22d3ee); color:#001018; font-weight:700; border:none; padding:10px 14px; border-radius:12px; cursor:pointer}
+  button.secondary{background:#111827; color:var(--txt); border:1px solid #263142}
+  .kpi{display:grid; grid-template-columns:repeat(3,1fr); gap:10px}
+  .kpi .item{background:#0b1223; border:1px solid #1f2937; border-radius:12px; padding:12px}
+  .kpi b{font-size:20px}
+  .muted{color:var(--muted)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  table{width:100%; border-collapse:collapse; font-size:14px}
+  th,td{border-bottom:1px solid #1f2937; padding:8px; text-align:left}
+  th{color:var(--muted); font-weight:600}
+  .small{font-size:12px; color:var(--muted)}
+  .mt{margin-top:14px}
+  .slider{width:220px}
+  .pill{display:inline-block; padding:4px 8px; border-radius:999px; background:#0b1223; border:1px solid #1f2937; color:var(--muted); font-size:12px}
+  .footer{margin-top:22px; color:var(--muted); font-size:12px}
+  code{background:#0b1223; padding:2px 6px; border-radius:6px; border:1px solid #1f2937}
+</style>
+</head>
+<body>
+<header>
+  <h1>Aplicación ML – Riesgo Psicosocial en La Guajira</h1>
+  <p>Calcula el índice psicosocial (P38), etiqueta “alto riesgo” (tercil superior) y entrena un modelo interpretable (Regresión Logística) en tu navegador.</p>
+</header>
+
+<main class="grid">
+  <!-- Panel izquierdo: Carga y preparación -->
+  <section class="card">
+    <h2>1) Cargar Excel y preparar datos</h2>
+    <div class="row">
+      <label>Archivo Excel:</label>
+      <input id="file" type="file" accept=".xlsx,.xls" />
+      <label>Hoja:</label>
+      <input id="sheet" type="text" value="Hoja1" />
+      <button id="loadBtn">Cargar</button>
+    </div>
+    <div class="mt small">
+      <b>Reglas del pipeline</b>:
+      <ul>
+        <li>Filtra <b>departamento</b> que contenga “Guajira”.</li>
+        <li>Índice psicosocial = promedio de <code>P38.1–P38.10</code> binarios (Sí=1/No=0), invirtiendo <b>P38.1</b>, <b>P38.2</b> y <b>P38.10</b> (protectores).</li>
+        <li><b>Alto riesgo</b> = tercil superior (≥ percentil 66.7%).</li>
+        <li>Predictores: <code>P36</code>, <code>P29</code>, <code>P31</code>, <code>P34</code>, <code>P40</code>, <code>P42</code>, <code>P45</code>, <code>P46</code>, <code>P47</code>, <code>P48</code>, <code>P64</code>, <code>P67</code>, más <code>oficio</code> y <code>municipio</code> si están presentes.</li>
+      </ul>
+    </div>
+    <div id="loadInfo" class="mt small muted"></div>
+    <div class="kpi mt">
+      <div class="item"><div class="muted">Filas en archivo</div><b id="kpiTotal">–</b></div>
+      <div class="item"><div class="muted">Filas La Guajira</div><b id="kpiLG">–</b></div>
+      <div class="item"><div class="muted">Umbral tercil (score)</div><b id="kpiThr">–</b></div>
+    </div>
+  </section>
+
+  <!-- Panel derecho: Entrenamiento -->
+  <section class="card">
+    <h2>2) Entrenar modelo en el navegador</h2>
+    <div class="row">
+      <button id="trainBtn">Entrenar regresión logística</button>
+      <span class="pill">optim. Adam • loss: log loss</span>
+      <label>Épocas:</label><input type="number" id="epochs" value="250" style="width:90px" />
+      <label>Batch:</label><input type="number" id="batch" value="32" style="width:90px" />
+    </div>
+    <div class="row mt">
+      <label>Umbral decisión:</label>
+      <input id="thr" class="slider" type="range" min="0.05" max="0.95" step="0.01" value="0.5" />
+      <span id="thrVal" class="pill">0.50</span>
+      <button id="dlPred" class="secondary">Descargar predicciones CSV</button>
+      <button id="dlCoef" class="secondary">Descargar coeficientes CSV</button>
+    </div>
+    <div class="kpi mt">
+      <div class="item"><div class="muted">ROC-AUC</div><b id="kpiROC">–</b></div>
+      <div class="item"><div class="muted">PR-AUC</div><b id="kpiPR">–</b></div>
+      <div class="item"><div class="muted">Brier</div><b id="kpiBrier">–</b></div>
+    </div>
+    <div class="grid mt" style="grid-template-columns:1fr 1fr;">
+      <div><canvas id="rocChart" height="200"></canvas></div>
+      <div><table id="cmat"><thead><tr><th></th><th>Pred 0</th><th>Pred 1</th></tr></thead>
+        <tbody>
+          <tr><th>Real 0</th><td id="tn">–</td><td id="fp">–</td></tr>
+          <tr><th>Real 1</th><td id="fn">–</td><td id="tp">–</td></tr>
+        </tbody></table>
+        <div class="small muted mt">La matriz de confusión se calcula sobre el conjunto de <b>prueba (20%)</b> con el umbral seleccionado.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Panel: Coeficientes e insights -->
+  <section class="card">
+    <h2>3) Importancia (coeficientes) e insights</h2>
+    <table id="coefTbl">
+      <thead><tr><th>Variable</th><th>Coeficiente (β)</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="footer">Los coeficientes corresponden al modelo de regresión logística con <i>one-hot</i> para categóricas. β&gt;0 aumenta probabilidad de “alto riesgo”.</div>
+  </section>
+
+  <!-- Panel: Resumen por oficio -->
+  <section class="card">
+    <h2>4) Resumen por oficio (La Guajira)</h2>
+    <table id="oficioTbl">
+      <thead>
+        <tr>
+          <th>Oficio</th>
+          <th>n</th>
+          <th>Sol sin protección (P29.5)</th>
+          <th>Repetitividad (P36.4)</th>
+          <th>Dolor MME (P36.6)</th>
+          <th>Usa EPP (P64)</th>
+          <th>Capacitación (P67)</th>
+          <th>Accidente (P57)</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="small muted mt">Valores = proporciones (0–1) por oficio.</div>
+  </section>
+</main>
+
+<script>
+/* ------------------ Utilidades ------------------ */
+const SI = ["SI","SÍ","TRUE","1","X","SIEMPRE"];
+const NO = ["NO","FALSE","0","NUNCA"];
+
+function toBin(v){
+  if (v===null || v===undefined || v==="") return NaN;
+  if (typeof v==="number") return v;
+  const s = String(v).trim().toUpperCase();
+  if (SI.includes(s) || s.startsWith("SI")) return 1;
+  if (NO.includes(s)) return 0;
+  return NaN;
+}
+function mean(nums){ const a=nums.filter(x=>!Number.isNaN(x)); return a.length? a.reduce((p,c)=>p+c,0)/a.length : NaN; }
+function quantile(arr, q){
+  const a=arr.filter(x=>!Number.isNaN(x)).sort((x,y)=>x-y); if(!a.length) return NaN;
+  const pos=(a.length-1)*q; const base=Math.floor(pos); const rest=pos-base;
+  return a[base]+(a[base+1]-a[base])*(isNaN(rest)?0:rest);
+}
+function parseRangeMean(s){
+  if (s===null||s===undefined||s==="") return NaN;
+  if (typeof s==="number") return s;
+  const str=String(s).replace(",",".");
+  const m=[...str.matchAll(/\d+(?:[.]\d+)?/g)].map(x=>parseFloat(x[0]));
+  if (!m.length) return NaN;
+  return m.reduce((p,c)=>p+c,0)/m.length;
+}
+function downloadCSV(filename, rows){
+  const process = v => (v==null? "" : (typeof v==="string" && v.includes(",") ? `"${v.replaceAll('"','""')}"` : v));
+  const header = Object.keys(rows[0]||{}).join(",");
+  const body = rows.map(r => Object.values(r).map(process).join(",")).join("\n");
+  const csv = header + "\n" + body;
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+function stratifiedSplit(y, testRatio=0.2){
+  const idx=[...Array(y.length).keys()];
+  const ones=idx.filter(i=>y[i]===1);
+  const zeros=idx.filter(i=>y[i]===0);
+  const shuffle=a=>a.sort(()=>Math.random()-0.5);
+  shuffle(ones); shuffle(zeros);
+  const testSizeOnes=Math.max(1,Math.round(ones.length*testRatio));
+  const testSizeZeros=Math.max(1,Math.round(zeros.length*testRatio));
+  const testIdx=new Set([...ones.slice(0,testSizeOnes),...zeros.slice(0,testSizeZeros)]);
+  const trainIdx=idx.filter(i=>!testIdx.has(i));
+  return {trainIdx, testIdx:[...testIdx]};
+}
+
+/* ------------------ Estado global ------------------ */
+let RAW = [];
+let LG = [];
+let DATA = null;
+let MODEL = null;
+let PRED_TEST = [];
+let ROC = null;
+let PR = null;
+
+/* ------------------ Cargar Excel ------------------ */
+document.getElementById("loadBtn").addEventListener("click", async ()=>{
+  const file = document.getElementById("file").files[0];
+  const sheetName = document.getElementById("sheet").value || "Hoja1";
+  if (!file) { alert("Selecciona un archivo .xlsx"); return; }
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data, {type:"array"});
+  if (!wb.Sheets[sheetName]) { alert("No existe la hoja: "+sheetName); return; }
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
+  RAW = rows;
+  const deptKey = Object.keys(rows[0]||{}).find(k => k.toLowerCase().includes("depart"));
+  LG = deptKey ? rows.filter(r => (String(r[deptKey]||"").toLowerCase().includes("guajira"))) : rows.slice();
+  const ds = buildDataset(LG);
+  DATA = ds;
+  document.getElementById("kpiTotal").textContent = rows.length;
+  document.getElementById("kpiLG").textContent = LG.length;
+  document.getElementById("kpiThr").textContent = ds.psicoThr.toFixed(2);
+  document.getElementById("loadInfo").innerHTML =
+    `Detectadas ${ds.p38Cols.length} variables P38.* · score promedio = ${mean(ds.psicoScore).toFixed(3)} · `+
+    `alto riesgo = ${ds.y.filter(x=>x===1).length} / ${ds.y.length}`;
+  renderOficioTable(LG, ds);
+  document.getElementById("kpiROC").textContent = "–";
+  document.getElementById("kpiPR").textContent  = "–";
+  document.getElementById("kpiBrier").textContent = "–";
+  ["tn","fp","fn","tp"].forEach(id=>document.getElementById(id).textContent="–");
+  document.querySelector("#coefTbl tbody").innerHTML = "";
+  if (window._rocChart){ window._rocChart.destroy(); }
+});
+
+/* ------------------ Construir dataset y features ------------------ */
+function buildDataset(rows){
+  const cols = Object.keys(rows[0]||{});
+  const has = pref => cols.filter(c => c.startsWith(pref));
+  const p38Cols = has("P38.");
+  const p38Bin = rows.map(r => {
+    const obj={};
+    p38Cols.forEach(c => obj[c] = toBin(r[c]));
+    return obj;
+  });
+  const protect = c => /^P38\.1\b/.test(c) || /^P38\.2\b/.test(c) || /^P38\.10\b/.test(c);
+  const psicoScore = p38Bin.map(obj=>{
+    const vals=[];
+    for (const c of Object.keys(obj)){
+      let v = obj[c];
+      if (!Number.isNaN(v) && v!=null){
+        if (protect(c)) v = 1 - v;
+        vals.push(v);
+      }
+    }
+    return vals.length? vals.reduce((p,c)=>p+c,0)/vals.length : NaN;
+  });
+  const psicoThr = quantile(psicoScore, 2/3);
+  const y = psicoScore.map(s => (s>=psicoThr?1:0));
+
+  const blocks = ["P36.","P29.","P31.","P34.","P40.","P42.","P64.","P67."];
+  const Xbin = rows.map(r=>{
+    const out={};
+    for (const pref of blocks){
+      cols.filter(k=>k.startsWith(pref)).forEach(k=>{
+        out[k] = toBin(r[k]);
+      });
+    }
+    return out;
+  });
+  const p45Key = cols.find(k=>k.startsWith("P45."));
+  const p46Key = cols.find(k=>k.startsWith("P46."));
+  const addNum = rows.map((r,i)=>({
+      ...Xbin[i],
+      ...(p45Key? {[p45Key]: parseRangeMean(r[p45Key])} : {}),
+      ...(p46Key? {[p46Key]: parseRangeMean(r[p46Key])} : {}),
+  }));
+  const offKey = cols.find(k=>k.toUpperCase().includes("OFICIO") || k.toUpperCase().includes("OCUPACIÓN") || k.toUpperCase().includes("OCUPACION"));
+  const muniKey = cols.find(k=>k.toLowerCase()==="municipio");
+  const p47Key = cols.find(k=>k.startsWith("P47."));
+  const p48Key = cols.find(k=>k.startsWith("P48."));
+  const catKeys = [offKey, muniKey, p47Key, p48Key].filter(Boolean);
+  const cats = {};
+  for (const ck of catKeys){
+    cats[ck] = Array.from(new Set(rows.map(r=> String(r[ck]??"").trim()))).filter(s=>s.length>0);
+  }
+  const numKeys = Object.keys(addNum[0]||{});
+  function rowToFeatureVector(idx){
+    const r = rows[idx];
+    const v = [];
+    const names = [];
+    numKeys.forEach(k=>{
+      names.push(k);
+      const val = addNum[idx][k];
+      v.push(Number.isFinite(val)? val : 0);
+    });
+    for (const ck of catKeys){
+      const catsHere = cats[ck];
+      for (const cat of catsHere){
+        names.push(`${ck}==${cat}`);
+        v.push(String(r[ck]??"").trim()===cat? 1:0);
+      }
+    }
+    return {v, names};
+  }
+  const {trainIdx, testIdx} = stratifiedSplit(y,0.2);
+  const featureNames = rowToFeatureVector(0).names;
+  function buildXY(indexes){
+    const X = indexes.map(i=> rowToFeatureVector(i).v);
+    const Y = indexes.map(i=> y[i]);
+    const id = indexes.map(i=>i);
+    return {X, Y, id};
+  }
+  const train = buildXY(trainIdx);
+  const test  = buildXY(testIdx);
+  return {
+    rows, cols,
+    p38Cols, psicoScore, psicoThr, y,
+    X_train: train.X, y_train: train.Y, id_train: train.id,
+    X_test:  test.X,  y_test:  test.Y,  id_test:  test.id,
+    featureNames,
+    offKey, muniKey,
+  };
+}
+
+/* ------------------ Entrenar regresión logística (tf.js) ------------------ */
+document.getElementById("trainBtn").addEventListener("click", async ()=>{
+  if (!DATA){ alert("Carga el Excel primero."); return; }
+  const Xtr = tf.tensor2d(DATA.X_train);
+  const ytr = tf.tensor2d(DATA.y_train, [DATA.y_train.length,1]);
+  const Xte = tf.tensor2d(DATA.X_test);
+  const yte = tf.tensor1d(DATA.y_test);
+
+  const model = tf.sequential();
+  model.add(tf.layers.dense({inputShape:[DATA.featureNames.length], units:1, activation:"sigmoid", useBias:true}));
+  model.compile({optimizer: tf.train.adam(0.05), loss:"binaryCrossentropy"});
+  MODEL = model;
+
+  const epochs = parseInt(document.getElementById("epochs").value||"250",10);
+  const batch  = parseInt(document.getElementById("batch").value||"32",10);
+  await model.fit(Xtr, ytr, {epochs, batchSize:batch, verbose:0});
+
+  const pred = model.predict(Xte).dataSync();
+  PRED_TEST = Array.from(pred);
+
+  const roc = computeROC(DATA.y_test, PRED_TEST);
+  const pr  = computePR(DATA.y_test, PRED_TEST);
+  ROC = roc; PR = pr;
+  const brier = mean(DATA.y_test.map((yi,i)=> (yi - PRED_TEST[i])**2 ));
+
+  document.getElementById("kpiROC").textContent = roc.auc.toFixed(3);
+  document.getElementById("kpiPR").textContent  = pr.auc.toFixed(3);
+  document.getElementById("kpiBrier").textContent = brier.toFixed(3);
+  drawROC(roc);
+  updateConfusion();
+
+  const weights = await model.getWeights()[0].array();
+  const bias    = await model.getWeights()[1].array();
+  const coefs = DATA.featureNames.map((name,i)=>({name, beta: weights[i][0]}))
+                    .sort((a,b)=> Math.abs(b.beta)-Math.abs(a.beta))
+                    .slice(0, 40);
+  renderCoefTable(coefs);
+  window._coefsForDownload = coefs.map(r=>({variable:r.name, coef:r.beta}));
+  window._predForDownload = DATA.id_test.map((id,i)=>({
+    id, y_true: DATA.y_test[i], p_pred: PRED_TEST[i]
+  }));
+});
+
+document.getElementById("thr").addEventListener("input", ()=>{ 
+  document.getElementById("thrVal").textContent = (+document.getElementById("thr").value).toFixed(2);
+  if (PRED_TEST.length) updateConfusion();
+});
+
+/* ------------------ Métricas, curvas y tablas ------------------ */
+function computeROC(y, p){
+  const P = y.reduce((s,v)=>s+(v===1),0), N = y.length-P;
+  if (P===0 || N===0) return {pts:[], auc:0};
+  const pairs = y.map((yi,i)=>({yi,pi:p[i]})).sort((a,b)=> b.pi - a.pi);
+  let tp=0, fp=0, tn=0, fn=0;
+  const pts = [];
+  let prev = -1;
+  for (const {yi,pi} of pairs){
+    if (pi!==prev){
+      pts.push({fpr: fp/N, tpr: tp/P});
+      prev = pi;
+    }
+    if (yi===1) tp++; else fp++;
+  }
+  pts.push({fpr: fp/N, tpr: tp/P});
+  let auc=0;
+  for (let i=1;i<pts.length;i++){
+    const dx = pts[i].fpr - pts[i-1].fpr;
+    const yavg = (pts[i].tpr + pts[i-1].tpr)/2;
+    auc += dx*yavg;
+  }
+  return {pts, auc};
+}
+function computePR(y, p){
+  const pairs = y.map((yi,i)=>({yi,pi:p[i]})).sort((a,b)=> b.pi - a.pi);
+  let tp=0, fp=0;
+  const P = y.reduce((s,v)=>s+(v===1),0);
+  const pts=[];
+  let prev=-1;
+  for (const {yi,pi} of pairs){
+    if (pi!==prev){
+      const prec = tp===0? 1 : tp/(tp+fp);
+      const rec  = P===0? 0 : tp/P;
+      pts.push({prec, rec});
+      prev=pi;
+    }
+    if (yi===1) tp++; else fp++;
+  }
+  const prec = tp===0?1:tp/(tp+fp), rec = P===0?0:tp/P;
+  pts.push({prec, rec});
+  let auc=0;
+  for (let i=1;i<pts.length;i++){
+    const dx = pts[i].rec - pts[i-1].rec;
+    const yavg = (pts[i].prec + pts[i-1].prec)/2;
+    auc += dx*yavg;
+  }
+  return {pts, auc};
+}
+function drawROC(roc){
+  const ctx = document.getElementById("rocChart");
+  if (window._rocChart) window._rocChart.destroy();
+  window._rocChart = new Chart(ctx, {
+    type:"line",
+    data:{ 
+      labels: roc.pts.map(p=>p.fpr),
+      datasets:[{label:"ROC", data: roc.pts.map(p=>p.tpr), fill:false}]
+    },
+    options:{ responsive:true, scales:{ x:{title:{text:"FPR",display:true}}, y:{title:{text:"TPR",display:true}, min:0, max:1}}}
+  });
+}
+function updateConfusion(){
+  const thr = +document.getElementById("thr").value;
+  let tp=0, fp=0, tn=0, fn=0;
+  for (let i=0;i<DATA.y_test.length;i++){
+    const y = DATA.y_test[i];
+    const p = PRED_TEST[i];
+    const yhat = p>=thr? 1:0;
+    if (y===1 && yhat===1) tp++;
+    else if (y===0 && yhat===1) fp++;
+    else if (y===1 && yhat===0) fn++;
+    else tn++;
+  }
+  document.getElementById("tp").textContent = tp;
+  document.getElementById("fp").textContent = fp;
+  document.getElementById("tn").textContent = tn;
+  document.getElementById("fn").textContent = fn;
+}
+function renderCoefTable(rows){
+  const tb = document.querySelector("#coefTbl tbody");
+  tb.innerHTML = "";
+  rows.forEach(r=>{
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${r.name}</td><td>${r.beta.toFixed(4)}</td>`;
+    tb.appendChild(tr);
+  });
+}
+function renderOficioTable(rows, ds){
+  const offKey = ds.offKey;
+  const tb = document.querySelector("#oficioTbl tbody");
+  tb.innerHTML = "";
+  if (!offKey){ tb.innerHTML = `<tr><td colspan="8" class="muted">No se encontró columna de oficio/ocupación.</td></tr>`; return; }
+  const groups = {};
+  for (const r of rows){
+    const off = String(r[offKey]??"").trim() || "(sin dato)";
+    if (!groups[off]) groups[off] = [];
+    groups[off].push(r);
+  }
+  const colsBin = {
+    sol: "P29.5 Trabajo bajo el sol sin protección",
+    rep: "P36.4 Realiza movimientos repetitivos con las manos o el cuerpo ",
+    dol: "P36.6 Siente dolor de espalda, piernas o brazos por su trabajo",
+    epp: "P64. ¿Usa algún equipo o elemento de protección personal (EPP) en su trabajo?",
+    cap: "P67. ¿Ha recibido capacitación sobre seguridad, peligros y riesgos laborales en el trabajo?",
+    acc: "P57. ¿Ha sufrido accidente en su trabajo?"
+  };
+  for (const off of Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length)){
+    const g = groups[off];
+    const n = g.length;
+    const p = k => mean(g.map(r=> toBin(r[k])));
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${off}</td>
+      <td>${n}</td>
+      <td>${(p(colsBin.sol)||0).toFixed(3)}</td>
+      <td>${(p(colsBin.rep)||0).toFixed(3)}</td>
+      <td>${(p(colsBin.dol)||0).toFixed(3)}</td>
+      <td>${(p(colsBin.epp)||0).toFixed(3)}</td>
+      <td>${(p(colsBin.cap)||0).toFixed(3)}</td>
+      <td>${(p(colsBin.acc)||0).toFixed(3)}</td>
+    `;
+    tb.appendChild(row);
+  }
+}
+
+/* ------------------ Descargas ------------------ */
+document.getElementById("dlPred").addEventListener("click", ()=>{
+  if (!window._predForDownload) return alert("Entrena el modelo primero.");
+  downloadCSV("predicciones_test.csv", window._predForDownload);
+});
+document.getElementById("dlCoef").addEventListener("click", ()=>{
+  if (!window._coefsForDownload) return alert("Entrena el modelo primero.");
+  downloadCSV("coeficientes_modelo.csv", window._coefsForDownload);
+});
+</script>
+</body>
+</html>
